@@ -489,21 +489,21 @@ extension CGEventInputSinkFailureTests {
         }
     }
 
-    func testSpaceShortcutsPostControlArrowDownThenUp() {
+    func testSpaceShortcutsPressControlArrowThenReleaseControl() {
         let expected: [(SpaceShortcut, Int64)] = [(.previousSpace, 123), (.nextSpace, 124), (.missionControl, 126)]
+        let arrowFlags: CGEventFlags = [.maskControl, .maskSecondaryFn, .maskNumericPad]
         for (shortcut, keyCode) in expected {
             let environment = MockMouseEnvironment()
             environment.currentFlags = [.maskShift]
             environment.makeKeyEvent = keyFactory()
             let sink = environment.makeSink()
             XCTAssertEqual(sink.tryPostShortcut(shortcut), .postInvoked)
-            XCTAssertEqual(environment.posts.map(\.event.type), [.keyDown, .keyUp])
-            for post in environment.posts {
-                XCTAssertEqual(post.event.getIntegerValueField(.keyboardEventKeycode), keyCode)
-                XCTAssertEqual(post.event.flags, [.maskControl, .maskSecondaryFn, .maskNumericPad],
-                               "Exactly Control plus the flags a hardware arrow key carries; held modifiers do not leak in")
-                XCTAssertEqual(post.tap, .cgSessionEventTap)
-            }
+            XCTAssertEqual(environment.posts.map(\.event.type), [.flagsChanged, .keyDown, .keyUp, .flagsChanged])
+            XCTAssertEqual(environment.posts.map { $0.event.getIntegerValueField(.keyboardEventKeycode) },
+                           [59, keyCode, keyCode, 59])
+            XCTAssertEqual(environment.posts.map(\.event.flags), [[.maskControl], arrowFlags, arrowFlags, []],
+                           "Held modifiers do not leak in, and the last event releases Control")
+            XCTAssertTrue(environment.posts.allSatisfy { $0.tap == .cgSessionEventTap })
         }
     }
 
@@ -524,5 +524,12 @@ extension CGEventInputSinkFailureTests {
         let missing = MockMouseEnvironment()
         XCTAssertEqual(missing.makeSink().tryPostShortcut(.nextSpace), .constructionFailed)
         XCTAssertTrue(missing.posts.isEmpty)
+
+        // A shortcut that cannot build its Control release posts nothing, so Control is never left held.
+        let noRelease = MockMouseEnvironment()
+        let factory = keyFactory()
+        noRelease.makeKeyEvent = { key, down in key == 59 && !down ? nil : factory(key, down) }
+        XCTAssertEqual(noRelease.makeSink().tryPostShortcut(.nextSpace), .constructionFailed)
+        XCTAssertTrue(noRelease.posts.isEmpty)
     }
 }

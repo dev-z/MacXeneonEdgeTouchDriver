@@ -187,26 +187,43 @@ public final class CGEventInputSink: ClickCountSyntheticInputSink, ScrollInputSi
         return .postInvoked
     }
 
-    /// Posts Control plus an arrow key as one down/up pair. The flags are set
+    /// Posts the keystrokes a keyboard sends for Control plus an arrow key:
+    /// Control down, arrow down, arrow up, Control up. The flags are set
     /// explicitly, so modifiers the user is holding do not change the shortcut;
     /// a hardware arrow key also carries the function and numeric-pad flags.
+    /// The closing Control release matters: the event source's modifier state
+    /// follows the posted flags, and without it macOS keeps Control held, which
+    /// turns every later touch click into a Control-click (a right-click).
     public func tryPostShortcut(_ shortcut: SpaceShortcut) -> SyntheticInputResult {
         guard !operationInFlight, press == nil else { return .busy }
         guard let source = environment.sourceStateID else { return .sourceUnavailable }
         operationInFlight = true
         defer { operationInFlight = false }
+        let control: CGKeyCode = 59     // kVK_Control
         let key: CGKeyCode
         switch shortcut {
         case .previousSpace: key = 123  // kVK_LeftArrow
         case .nextSpace: key = 124      // kVK_RightArrow
         case .missionControl: key = 126 // kVK_UpArrow
         }
-        guard let down = environment.makeKeyEvent?(key, true),
-              let up = environment.makeKeyEvent?(key, false) else { return .constructionFailed }
-        guard down.getIntegerValueField(.eventSourceStateID) == source,
-              up.getIntegerValueField(.eventSourceStateID) == source else { return .sourceUnavailable }
-        for event in [down, up] {
-            event.flags = [.maskControl, .maskSecondaryFn, .maskNumericPad]
+        let arrowFlags: CGEventFlags = [.maskControl, .maskSecondaryFn, .maskNumericPad]
+        // Build every event before posting any, so a failure never leaves Control held.
+        guard let controlDown = environment.makeKeyEvent?(control, true),
+              let down = environment.makeKeyEvent?(key, true),
+              let up = environment.makeKeyEvent?(key, false),
+              let controlUp = environment.makeKeyEvent?(control, false) else { return .constructionFailed }
+        let sequence: [(MouseInputEvent, CGEventType, CGEventFlags)] = [
+            (controlDown, .flagsChanged, [.maskControl]),
+            (down, .keyDown, arrowFlags),
+            (up, .keyUp, arrowFlags),
+            (controlUp, .flagsChanged, []),
+        ]
+        guard sequence.allSatisfy({ $0.0.getIntegerValueField(.eventSourceStateID) == source }) else {
+            return .sourceUnavailable
+        }
+        for (event, type, flags) in sequence {
+            event.type = type
+            event.flags = flags
             environment.post(event, eventTap)
         }
         return .postInvoked
