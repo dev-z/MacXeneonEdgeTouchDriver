@@ -22,13 +22,14 @@ struct MouseInputEnvironment {
     let sourceStateID: Int64?
     let flags: () -> CGEventFlags
     var makeScrollEvent: ((CGPoint) -> MouseInputEvent?)? = nil
+    var makeKeyEvent: ((CGKeyCode, Bool) -> MouseInputEvent?)? = nil
 }
 
 /// Posts synthetic left-button events. GestureController exclusively uses the
 /// managed reporting API; that API reserves one release before posting a down.
 /// The original Void API retains single-event behavior, without reserve guarantees.
 /// Do not mix raw and managed calls within a press. Requires serial use.
-public final class CGEventInputSink: ClickCountSyntheticInputSink, ScrollInputSink {
+public final class CGEventInputSink: ClickCountSyntheticInputSink, ScrollInputSink, ShortcutInputSink {
     private let environment: MouseInputEnvironment
     private let eventTap: CGEventTapLocation
     private var operationInFlight = false
@@ -75,6 +76,9 @@ public final class CGEventInputSink: ClickCountSyntheticInputSink, ScrollInputSi
                                               wheelCount: 2, wheel1: 0, wheel2: 0, wheel3: 0) else { return nil }
                     event.location = point
                     return event
+                },
+                makeKeyEvent: { key, down in
+                    CGEvent(keyboardEventSource: eventSource, virtualKey: key, keyDown: down)
                 }
             ),
             eventTap: eventTap
@@ -180,6 +184,31 @@ public final class CGEventInputSink: ClickCountSyntheticInputSink, ScrollInputSi
         event.setIntegerValueField(.scrollWheelEventFixedPtDeltaAxis1, value: Int64((deltaY * 65_536).rounded()))
         event.setIntegerValueField(.scrollWheelEventFixedPtDeltaAxis2, value: Int64((deltaX * 65_536).rounded()))
         environment.post(event, eventTap)
+        return .postInvoked
+    }
+
+    /// Posts Control plus an arrow key as one down/up pair. The flags are set
+    /// explicitly, so modifiers the user is holding do not change the shortcut;
+    /// a hardware arrow key also carries the function and numeric-pad flags.
+    public func tryPostShortcut(_ shortcut: SpaceShortcut) -> SyntheticInputResult {
+        guard !operationInFlight, press == nil else { return .busy }
+        guard let source = environment.sourceStateID else { return .sourceUnavailable }
+        operationInFlight = true
+        defer { operationInFlight = false }
+        let key: CGKeyCode
+        switch shortcut {
+        case .previousSpace: key = 123  // kVK_LeftArrow
+        case .nextSpace: key = 124      // kVK_RightArrow
+        case .missionControl: key = 126 // kVK_UpArrow
+        }
+        guard let down = environment.makeKeyEvent?(key, true),
+              let up = environment.makeKeyEvent?(key, false) else { return .constructionFailed }
+        guard down.getIntegerValueField(.eventSourceStateID) == source,
+              up.getIntegerValueField(.eventSourceStateID) == source else { return .sourceUnavailable }
+        for event in [down, up] {
+            event.flags = [.maskControl, .maskSecondaryFn, .maskNumericPad]
+            environment.post(event, eventTap)
+        }
         return .postInvoked
     }
 

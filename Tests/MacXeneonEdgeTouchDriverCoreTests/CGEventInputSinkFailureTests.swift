@@ -373,6 +373,7 @@ private final class MockMouseEnvironment {
     var discardPosts = false
     var onEffect: ((String) -> Void)?
     var makeScrollEvent: ((CGPoint) -> MouseInputEvent?)?
+    var makeKeyEvent: ((CGKeyCode, Bool) -> MouseInputEvent?)?
     private(set) var requests: [Request] = []
     private(set) var createdEvents: [MockMouseEvent] = []
     private(set) var posts: [Post] = []
@@ -417,7 +418,8 @@ private final class MockMouseEnvironment {
                 self.onEffect?("flags")
                 return self.currentFlags
             },
-            makeScrollEvent: makeScrollEvent
+            makeScrollEvent: makeScrollEvent,
+            makeKeyEvent: makeKeyEvent
         )
         if let eventTap { return CGEventInputSink(environment: environment, eventTap: eventTap) }
         return CGEventInputSink(environment: environment)
@@ -474,5 +476,53 @@ extension CGEventInputSinkFailureTests {
         XCTAssertEqual(sink.tryPostScroll(deltaX: .infinity, deltaY: 0, at: .zero), .constructionFailed)
         XCTAssertEqual(sink.tryPostScroll(deltaX: 0, deltaY: 1, at: .zero), .sourceUnavailable)
         XCTAssertTrue(environment.posts.isEmpty)
+    }
+}
+
+
+extension CGEventInputSinkFailureTests {
+    private func keyFactory(sourceStateID: Int64 = -42) -> (CGKeyCode, Bool) -> MouseInputEvent? {
+        { key, down in
+            let event = MockMouseEvent(type: down ? .keyDown : .keyUp, point: .zero, sourceStateID: sourceStateID)
+            event.setIntegerValueField(.keyboardEventKeycode, value: Int64(key))
+            return event
+        }
+    }
+
+    func testSpaceShortcutsPostControlArrowDownThenUp() {
+        let expected: [(SpaceShortcut, Int64)] = [(.previousSpace, 123), (.nextSpace, 124), (.missionControl, 126)]
+        for (shortcut, keyCode) in expected {
+            let environment = MockMouseEnvironment()
+            environment.currentFlags = [.maskShift]
+            environment.makeKeyEvent = keyFactory()
+            let sink = environment.makeSink()
+            XCTAssertEqual(sink.tryPostShortcut(shortcut), .postInvoked)
+            XCTAssertEqual(environment.posts.map(\.event.type), [.keyDown, .keyUp])
+            for post in environment.posts {
+                XCTAssertEqual(post.event.getIntegerValueField(.keyboardEventKeycode), keyCode)
+                XCTAssertEqual(post.event.flags, [.maskControl, .maskSecondaryFn, .maskNumericPad],
+                               "Exactly Control plus the flags a hardware arrow key carries; held modifiers do not leak in")
+                XCTAssertEqual(post.tap, .cgSessionEventTap)
+            }
+        }
+    }
+
+    func testShortcutDoesNotPostDuringAPressOrWithAForeignSource() {
+        let environment = MockMouseEnvironment()
+        environment.makeKeyEvent = keyFactory()
+        let sink = environment.makeSink()
+        XCTAssertEqual(sink.tryPostMouseDown(at: .zero), .postInvoked)
+        let postsAfterDown = environment.posts.count
+        XCTAssertEqual(sink.tryPostShortcut(.nextSpace), .busy)
+        XCTAssertEqual(environment.posts.count, postsAfterDown)
+
+        let foreign = MockMouseEnvironment()
+        foreign.makeKeyEvent = keyFactory(sourceStateID: 123)
+        XCTAssertEqual(foreign.makeSink().tryPostShortcut(.nextSpace), .sourceUnavailable)
+        XCTAssertTrue(foreign.posts.isEmpty)
+
+        let missing = MockMouseEnvironment()
+        XCTAssertEqual(missing.makeSink().tryPostShortcut(.nextSpace), .constructionFailed)
+        XCTAssertTrue(missing.posts.isEmpty)
     }
 }

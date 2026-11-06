@@ -53,6 +53,14 @@ public final class GestureController {
     private let captureDoubleClickPermit: () -> PhysicalInputGuard.Permit
     private let options: GestureOptions
     private var isScrolling = false
+    // An edge-zone touch waits for the hold duration like scroll mode; moving
+    // earlier makes it an edge swipe, which never presses the button.
+    private var edgeSwipeCandidate = false
+    private var isEdgeSwiping = false
+    // The target check failed (for example, an empty desktop has no window under
+    // the finger). An edge-zone touch continues for swipes only: it can never
+    // press the button, so nothing unconfirmed is clicked.
+    private var edgeSwipeOnly = false
     private let performanceMetrics: DriverPerformanceMetrics?
     private var preparation: Preparation?
     private var preparationDeadline: GestureScheduledTask?
@@ -241,6 +249,10 @@ public final class GestureController {
 
         let point = mapper.map(rawX: event.rawX, rawY: event.rawY)
 
+        if edgeSwipeCandidate, phase == .tracking,
+           case .singleTouch = state, event.kind != .down,
+           handleEdgeSwipe(event, point: point, bounds: mapper.displayBounds) { return }
+
         if options.mode == .scroll, phase == .tracking,
            case .singleTouch = state, event.kind != .down,
            handleScrollMode(event, point: point) { return }
@@ -256,6 +268,10 @@ public final class GestureController {
             }
 
             isScrolling = false
+            isEdgeSwiping = false
+            edgeSwipeOnly = false
+            edgeSwipeCandidate = inputSink is ShortcutInputSink &&
+                EdgeSwipeRecognizer(options: options.edgeSwipes).startsInEdgeZone(point, bounds: mapper.displayBounds)
             contactStartedAt = event.timestamp.uptimeNanoseconds
             contactReleasedAt = nil
             clickTarget = nil
@@ -419,6 +435,64 @@ public final class GestureController {
         return false
     }
 
+    /// An edge-zone touch that moves before the hold duration becomes an edge
+    /// swipe. It owns no mouse button; on release it posts at most one shortcut
+    /// while the cursor is still on the panel, then returns the cursor.
+    private func handleEdgeSwipe(_ event: TouchEvent, point: CGPoint, bounds: CGRect) -> Bool {
+        guard case .singleTouch(var context) = state, context.contactID == event.contactID,
+              !context.isMouseDownPosted else { return false }
+        let elapsed = event.timestamp.uptimeNanoseconds >= contactStartedAt ?
+            event.timestamp.uptimeNanoseconds - contactStartedAt : 0
+        let withinHold = elapsed < UInt64(options.holdDurationMs) * 1_000_000
+        let distance = hypot(point.x - context.startPoint.x, point.y - context.startPoint.y)
+        if !isEdgeSwiping, distance >= options.movementThresholdPx, withinHold || edgeSwipeOnly {
+            pendingMouseDown?.cancel()
+            pendingMouseDown = nil
+            isEdgeSwiping = true
+            doubleClicks.reset()
+        }
+        guard isEdgeSwiping || edgeSwipeOnly else {
+            // Jitter before the hold elapses neither drags nor scrolls; a release is a tap.
+            return event.kind == .move && withinHold
+        }
+        context.lastPoint = point
+        context.lastRawX = event.rawX
+        context.lastRawY = event.rawY
+        state = .singleTouch(context)
+        guard event.kind == .up else { return true }
+
+        let acceptedGeneration = generation
+        let recognizer = EdgeSwipeRecognizer(options: options.edgeSwipes)
+        if !isEdgeSwiping {
+            DriverLoggers.log(.debug, category: .gesture, "Swipe-only touch released without moving; nothing to click.")
+        } else if let shortcut = recognizer.shortcut(from: context.startPoint, to: point, bounds: bounds),
+           let sink = inputSink as? ShortcutInputSink {
+            let result = performInput { sink.tryPostShortcut(shortcut) }
+            if result == .postInvoked {
+                DriverLoggers.log(.debug, category: .gesture, "Edge swipe posted \(shortcut.rawValue).")
+            } else {
+                DriverLoggers.log(.warning, category: .gesture, "Edge swipe could not post \(shortcut.rawValue): \(result).")
+            }
+            finishDeferredInput()
+        } else {
+            let start = CGPoint(x: context.startPoint.x - bounds.minX, y: context.startPoint.y - bounds.minY)
+            DriverLoggers.log(.debug, category: .gesture,
+                "Edge swipe released without a matching direction or distance; start=(\(Int(start.x)), \(Int(start.y))) on the panel, dx=\(Int(point.x - context.startPoint.x)), dy=\(Int(point.y - context.startPoint.y)).")
+        }
+        guard generation == acceptedGeneration, phase == .tracking else { return true }
+        isEdgeSwiping = false
+        edgeSwipeOnly = false
+        contactReleasedAt = event.timestamp.uptimeNanoseconds
+        lastCompletedTouchTimestamp = event.timestamp
+        phase = .waitingForCursorReturn
+        let task = schedule(after: timing.clickToWarpBackDelayMs) { [weak self] in
+            self?.returnCursorAndIdle(generation: acceptedGeneration)
+        }
+        if generation == acceptedGeneration, phase == .waitingForCursorReturn { pendingCursorReturn = task }
+        else { task.cancel() }
+        return true
+    }
+
     /// Handles a stuck gesture timeout by cleaning up any active mouse-down state.
     public func handleIdleTimeout() {
         forceCancel()
@@ -454,6 +528,8 @@ public final class GestureController {
     /// Forces the controller back to idle, posting cleanup events if needed.
     public func forceCancel() {
         isScrolling = false
+        isEdgeSwiping = false
+        edgeSwipeOnly = false
         doubleClicks.reset()
         invalidateInputSession()
         guard phase != .finishing, phase != .releaseBlocked else { return }
@@ -550,7 +626,10 @@ public final class GestureController {
         let preparedTargetPID = targetPreparer.preparedTargetProcessIdentifier
         let preparedPassiveTarget = targetPreparer.preparedTargetIsPassive
         let preparedIdentity = targetPreparer.preparedTargetIdentity
-        if targetPreparer.requiresPreparation && (!targetReady || !captureIsTimely) {
+        if targetPreparer.requiresPreparation && (!targetReady || !captureIsTimely) && edgeSwipeCandidate {
+            DriverLoggers.log(.debug, category: .gesture, "Touch target not confirmed; edge-zone touch continues for swipes only.")
+            edgeSwipeOnly = true
+        } else if targetPreparer.requiresPreparation && (!targetReady || !captureIsTimely) {
             // No speculative down if activation failed or exceeded its deadline.
             let ended = pendingInput.contains { $0.kind == .up }
             forceCancel()
@@ -610,8 +689,10 @@ public final class GestureController {
             finishDeferredInput()
             return
         }
-        focusRestorer.syntheticInputWillBegin(targetProcessIdentifier: preparedTargetPID, permitsWindowlessDestination: preparedPassiveTarget)
-        scheduleMouseDown(generation: self.generation, at: preparation.point)
+        if !edgeSwipeOnly {
+            focusRestorer.syntheticInputWillBegin(targetProcessIdentifier: preparedTargetPID, permitsWindowlessDestination: preparedPassiveTarget)
+            scheduleMouseDown(generation: self.generation, at: preparation.point)
+        }
         finishDeferredInput()
         for event in pendingInput {
             guard self.generation == acceptedGeneration else { break }
@@ -632,7 +713,7 @@ public final class GestureController {
         pendingMouseDown?.cancel()
         let elapsed = scheduler.now.uptimeNanoseconds >= contactStartedAt ?
             Int((scheduler.now.uptimeNanoseconds - contactStartedAt) / 1_000_000) : 0
-        let delay = options.mode == .scroll ? max(timing.warpToClickDelayMs, options.holdDurationMs - elapsed) : timing.warpToClickDelayMs
+        let delay = options.mode == .scroll || edgeSwipeCandidate ? max(timing.warpToClickDelayMs, options.holdDurationMs - elapsed) : timing.warpToClickDelayMs
         let task = schedule(after: delay) { [weak self] in
             self?.postMouseDownIfNeeded(generation: generation, at: point)
         }
@@ -658,7 +739,7 @@ public final class GestureController {
     }
 
     private func postMouseDownIfNeeded(generation: UInt64, at point: CGPoint) {
-        guard self.generation == generation, phase == .tracking, !isScrolling,
+        guard self.generation == generation, phase == .tracking, !isScrolling, !isEdgeSwiping, !edgeSwipeOnly,
               case .singleTouch(var context) = state else {
             return
         }

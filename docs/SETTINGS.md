@@ -47,7 +47,12 @@ All fields are optional. Edit the existing file with a plain-text editor, keep i
     "holdDurationMs": 300,
     "scrollThresholdPx": 6,
     "scrollSensitivity": 1.0,
-    "doubleClickEnabled": true
+    "doubleClickEnabled": true,
+    "edgeSwipes": {
+      "enabled": false,
+      "edgeZonePx": 40,
+      "minDistancePx": 200
+    }
   },
   "diagnostics": {
     "fileLogPath": "~/Library/Logs/MacXeneonEdgeTouchDriver/driver.log",
@@ -87,6 +92,22 @@ The default `gesture.mode`, `"direct"`, keeps the existing behavior: tap to clic
 Set `gesture.mode` to `"scroll"` to scroll with one finger. A quick tap still clicks. Movement beyond `scrollThresholdPx` scrolls the page; hold still for `holdDurationMs` before moving to drag instead. Increase `scrollSensitivity` for more scrolling per movement. Scrolling does not hold a mouse button down.
 
 Two nearby taps can produce a double-click within macOS's double-click interval. Both taps must hit the same window. If macOS identifies the button or control, both taps must hit it; otherwise they must land almost on the same point. A drag, failed click, changed display mapping or intervening mouse/keyboard input breaks the pair. Set `doubleClickEnabled` to `false` for separate clicks.
+
+### Edge swipes
+
+Set `gesture.edgeSwipes.enabled` to `true` to switch desktops (Spaces) and open Mission Control with one finger:
+
+| Swipe | Result | macOS shortcut it triggers |
+|-------|--------|----------------------------|
+| In from the left border | Previous desktop | Control + Left Arrow |
+| In from the right border | Next desktop | Control + Right Arrow |
+| Up from the bottom border | Mission Control | Control + Up Arrow |
+
+A swipe must start within `edgeZonePx` points of that border (5 to 200, default 40) and travel at least `minDistancePx` points away from it (50 to 2000, default 200), at least twice as far along that direction as across it. The top border is not used. The shortcut is posted when the finger lifts, while the cursor is still on the Edge. With "Displays have separate Spaces" turned on (the macOS default), only the Edge's desktops change. The shortcuts must stay enabled under System Settings > Keyboard > Keyboard Shortcuts > Mission Control.
+
+A touch that starts in a border strip waits for `holdDurationMs` before pressing, as in scroll mode, so a quick tap still clicks and holding still before moving still drags. A swipe never presses the mouse button. If it is too short or goes the wrong way, nothing happens.
+
+When no window can be confirmed under the finger, for example on an empty desktop, a touch inside a border strip continues for swipes only. Tapping or holding there clicks nothing. Outside the border strips, such a touch is rejected as before.
 
 The touch reports currently handled by this driver contain one position. Two-finger scrolling and other multi-contact gestures remain unsupported. `gesture.multiTouchEnabled` is forced to `false`; an unsupported mode logs a warning and keeps direct touch behavior. It does not silently switch to single-finger scrolling.
 

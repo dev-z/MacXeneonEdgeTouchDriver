@@ -299,3 +299,24 @@ extension ConfigurationTests {
         XCTAssertTrue(result.warnings[0].contains("Two-finger scrolling is unavailable"))
     }
 }
+
+extension ConfigurationTests {
+    func testEdgeSwipesDefaultOff() throws {
+        let gesture = DriverConfiguration.load(from: try writeConfig("{}")).configuration.gesture
+        XCTAssertFalse(gesture.edgeSwipes.enabled)
+        XCTAssertEqual(gesture.edgeSwipes.edgeZonePx, 40)
+        XCTAssertEqual(gesture.edgeSwipes.minDistancePx, 200)
+    }
+
+    func testEdgeSwipesConfigIsClampedAndReachesGestureOptions() throws {
+        let result = DriverConfiguration.load(from: try writeConfig("""
+        {"gesture":{"mode":"scroll","edgeSwipes":{"enabled":true,"edgeZonePx":500,"minDistancePx":10}}}
+        """))
+        let edge = result.configuration.gesture.edgeSwipes
+        XCTAssertTrue(edge.enabled)
+        XCTAssertEqual(edge.edgeZonePx, 200)
+        XCTAssertEqual(edge.minDistancePx, 50)
+        XCTAssertEqual(result.warnings.count, 2)
+        XCTAssertEqual(result.configuration.gesture.mode, .scroll)
+    }
+}

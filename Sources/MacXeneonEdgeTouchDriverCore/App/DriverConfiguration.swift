@@ -183,6 +183,15 @@ public struct DriverConfiguration: Codable, Equatable, Sendable {
             if let value = gesture.pinchModifies {
                 configuration.gesture.pinchModifies = value
             }
+            if let edge = gesture.edgeSwipes {
+                if let value = edge.enabled { configuration.gesture.edgeSwipes.enabled = value }
+                if let value = edge.edgeZonePx {
+                    configuration.gesture.edgeSwipes.edgeZonePx = clamp(value, to: 5...200, name: "gesture.edgeSwipes.edgeZonePx", warnings: &warnings)
+                }
+                if let value = edge.minDistancePx {
+                    configuration.gesture.edgeSwipes.minDistancePx = clamp(value, to: 50...2000, name: "gesture.edgeSwipes.minDistancePx", warnings: &warnings)
+                }
+            }
         }
 
         if let diagnostics = partial.diagnostics {
@@ -261,6 +270,14 @@ public extension DriverConfiguration {
         public var pinchHysteresisPx: Int
         public var minPinchForMagnify: Int
         public var pinchModifies: PinchMode
+        public var edgeSwipes: EdgeSwipes = EdgeSwipes()
+    }
+
+    /// One-finger swipes from the panel's left, right and bottom borders.
+    struct EdgeSwipes: Codable, Equatable, Sendable {
+        public var enabled: Bool = false
+        public var edgeZonePx: Int = 40
+        public var minDistancePx: Int = 200
     }
 
     /// Diagnostic file logging configuration.
@@ -344,6 +361,13 @@ private struct PartialGesture: Decodable {
     var pinchHysteresisPx: Int?
     var minPinchForMagnify: Int?
     var pinchModifies: DriverConfiguration.PinchMode?
+    var edgeSwipes: PartialEdgeSwipes?
+}
+
+private struct PartialEdgeSwipes: Decodable {
+    var enabled: Bool?
+    var edgeZonePx: Int?
+    var minDistancePx: Int?
 }
 
 private struct PartialDiagnostics: Decodable {
